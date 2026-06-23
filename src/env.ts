@@ -1,6 +1,11 @@
 import { mkdir, readFile, writeFile, chmod } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  isValidModelId,
+  OPENROUTER_API_KEY_ENV_KEY,
+  OPENWIKI_MODEL_ID_ENV_KEY,
+} from "./constants.js";
 
 export const openWikiEnvDir = path.join(os.homedir(), ".openwiki");
 export const openWikiEnvPath = path.join(openWikiEnvDir, ".env");
@@ -8,7 +13,10 @@ export const openWikiEnvPath = path.join(openWikiEnvDir, ".env");
 type EnvMap = Record<string, string>;
 
 export type CredentialDiagnostic = {
-  key: "LANGSMITH_API_KEY" | "OPENAI_API_KEY";
+  key:
+    | "LANGSMITH_API_KEY"
+    | typeof OPENROUTER_API_KEY_ENV_KEY
+    | typeof OPENWIKI_MODEL_ID_ENV_KEY;
   source:
     | "process.env"
     | "~/.openwiki/.env"
@@ -20,16 +28,28 @@ export type CredentialDiagnostic = {
 };
 
 const managedEnvKeys = [
-  "OPENAI_API_KEY",
+  OPENROUTER_API_KEY_ENV_KEY,
+  OPENWIKI_MODEL_ID_ENV_KEY,
   "LANGSMITH_API_KEY",
   "LANGCHAIN_PROJECT",
   "LANGCHAIN_TRACING_V2",
+];
+
+const deprecatedEnvKeys = [
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_ORG_ID",
+  "OPENAI_PROJECT",
 ];
 
 export async function loadOpenWikiEnv(): Promise<EnvMap> {
   const env = await readOpenWikiEnv();
 
   for (const [key, value] of Object.entries(env)) {
+    if (deprecatedEnvKeys.includes(key)) {
+      continue;
+    }
+
     if (process.env[key] === undefined) {
       process.env[key] = value;
     }
@@ -44,7 +64,8 @@ export async function getCredentialDiagnostics(): Promise<
   const fileEnv = await readOpenWikiEnv();
 
   return [
-    createCredentialDiagnostic("OPENAI_API_KEY", fileEnv),
+    createCredentialDiagnostic(OPENROUTER_API_KEY_ENV_KEY, fileEnv),
+    createCredentialDiagnostic(OPENWIKI_MODEL_ID_ENV_KEY, fileEnv),
     createCredentialDiagnostic("LANGSMITH_API_KEY", fileEnv),
   ];
 }
@@ -55,6 +76,10 @@ export async function saveOpenWikiEnv(updates: EnvMap): Promise<void> {
     ...currentEnv,
     ...updates,
   };
+
+  for (const key of deprecatedEnvKeys) {
+    delete nextEnv[key];
+  }
 
   await mkdir(openWikiEnvDir, {
     recursive: true,
@@ -96,8 +121,14 @@ function createCredentialDiagnostic(
     key,
     source,
     length: value.length,
-    preview: createCredentialPreview(value),
-    warnings: getCredentialWarnings(value),
+    preview:
+      key === OPENWIKI_MODEL_ID_ENV_KEY
+        ? JSON.stringify(value)
+        : createCredentialPreview(value),
+    warnings:
+      key === OPENWIKI_MODEL_ID_ENV_KEY
+        ? getModelWarnings(value)
+        : getCredentialWarnings(value),
   };
 }
 
@@ -148,6 +179,10 @@ function getCredentialWarnings(value: string): string[] {
   }
 
   return warnings;
+}
+
+function getModelWarnings(value: string): string[] {
+  return isValidModelId(value) ? [] : ["invalid model ID"];
 }
 
 async function readOpenWikiEnv(): Promise<EnvMap> {

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { MODEL_NAME, UPDATE_METADATA_PATH } from "../constants.js";
+import { UPDATE_METADATA_PATH } from "../constants.js";
 import type { OpenWikiCommand, RunContext, UpdateMetadata } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -28,13 +28,14 @@ export async function createRunContext(
 
 export async function writeLastUpdateMetadata(
   command: OpenWikiCommand,
-  cwd = process.cwd(),
+  cwd: string,
+  modelId: string,
 ): Promise<void> {
   const metadataFile = path.join(cwd, UPDATE_METADATA_PATH);
   const metadata: UpdateMetadata = {
     updatedAt: new Date().toISOString(),
     command,
-    model: MODEL_NAME,
+    model: modelId,
   };
 
   await mkdir(path.dirname(metadataFile), { recursive: true });

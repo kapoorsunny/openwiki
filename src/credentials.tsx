@@ -1,95 +1,68 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import { openWikiEnvPath, saveOpenWikiEnv } from "./env.js";
 import {
-  getOpenWikiUpdateWorkflowStatus,
-  openWikiWorkflowPath,
-  writeOpenWikiUpdateWorkflow,
-  type WorkflowStatus,
-  type WorkflowWriteStatus,
-} from "./github-action.js";
-
-export type WorkflowSetupStatus = WorkflowWriteStatus | "skipped";
+  DEFAULT_MODEL_ID,
+  isValidModelId,
+  normalizeModelId,
+  OPENROUTER_API_KEY_ENV_KEY,
+  OPENWIKI_MODEL_ID_ENV_KEY,
+  SUGGESTED_MODEL_IDS,
+} from "./constants.js";
+import { openWikiEnvPath, saveOpenWikiEnv } from "./env.js";
 
 export type InitSetupResult = {
-  savedOpenAIKey: boolean;
+  modelId: string | null;
   savedLangSmithKey: boolean;
-  workflow: {
-    path: string;
-    status: WorkflowSetupStatus;
-  };
+  savedModelId: boolean;
+  savedOpenRouterKey: boolean;
 };
 
 type InitSetupProps = {
+  modelIdOverride?: string | null;
   onComplete: (result: InitSetupResult) => void;
   onError: (message: string) => void;
 };
 
-type PromptStep = "openai" | "langsmith" | "workflow";
-type WorkflowSetupState =
-  | { status: "loading" }
-  | { status: "ready"; workflowStatus: WorkflowStatus };
+type PromptStep = "langsmith" | "model" | "openrouter";
 
-export function needsCredentialSetup(): boolean {
+export function needsCredentialSetup(modelIdOverride?: string | null): boolean {
   return (
-    !process.env.OPENAI_API_KEY || process.env.LANGSMITH_API_KEY === undefined
+    !process.env[OPENROUTER_API_KEY_ENV_KEY] ||
+    (modelIdOverride === null &&
+      process.env[OPENWIKI_MODEL_ID_ENV_KEY] === undefined) ||
+    process.env.LANGSMITH_API_KEY === undefined
   );
 }
 
-export function InitSetup({ onComplete, onError }: InitSetupProps) {
-  const [workflowSetupState, setWorkflowSetupState] =
-    useState<WorkflowSetupState>({
-      status: "loading",
-    });
+export function InitSetup({
+  modelIdOverride = null,
+  onComplete,
+  onError,
+}: InitSetupProps) {
   const [step, setStep] = useState<PromptStep | null>(null);
-  const [openAIKey, setOpenAIKey] = useState<string | null>(null);
+  const [openRouterKey, setOpenRouterKey] = useState<string | null>(null);
+  const [modelId, setModelId] = useState<string | null>(null);
   const [langSmithKey, setLangSmithKey] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    let isMounted = true;
+    const initialStep = getInitialStep(modelIdOverride);
 
-    getOpenWikiUpdateWorkflowStatus()
-      .then((workflowStatus) => {
-        if (!isMounted) {
-          return;
-        }
-
-        setWorkflowSetupState({
-          status: "ready",
-          workflowStatus,
-        });
-
-        const initialStep = getInitialStep(workflowStatus);
-
-        if (initialStep === null) {
-          onComplete({
-            savedOpenAIKey: false,
-            savedLangSmithKey: false,
-            workflow: {
-              path: openWikiWorkflowPath,
-              status: "unchanged",
-            },
-          });
-          return;
-        }
-
-        setStep(initialStep);
-      })
-      .catch((setupError: unknown) => {
-        onError(
-          setupError instanceof Error
-            ? setupError.message
-            : "Failed to inspect OpenWiki setup.",
-        );
+    if (initialStep === null) {
+      onComplete({
+        modelId:
+          modelIdOverride ?? process.env[OPENWIKI_MODEL_ID_ENV_KEY] ?? null,
+        savedLangSmithKey: false,
+        savedModelId: false,
+        savedOpenRouterKey: false,
       });
+      return;
+    }
 
-    return () => {
-      isMounted = false;
-    };
-  }, [onComplete, onError]);
+    setStep(initialStep);
+  }, [modelIdOverride, onComplete]);
 
   useInput((inputValue, key) => {
     if (isSaving || step === null) {
@@ -114,15 +87,40 @@ export function InitSetup({ onComplete, onError }: InitSetupProps) {
   async function submit() {
     setError(null);
 
-    if (step === "openai") {
+    if (step === "openrouter") {
       const trimmedInput = input.trim();
 
       if (trimmedInput.length === 0) {
-        setError("OpenAI API key is required.");
+        setError("OpenRouter API key is required.");
         return;
       }
 
-      setOpenAIKey(trimmedInput);
+      setOpenRouterKey(trimmedInput);
+      setInput("");
+      const nextStep = getNextStepAfterOpenRouter(modelIdOverride);
+
+      if (nextStep) {
+        setStep(nextStep);
+        return;
+      }
+
+      await completeSetup({
+        nextLangSmithKey: langSmithKey,
+        nextModelId: modelId,
+        nextOpenRouterKey: trimmedInput,
+      });
+      return;
+    }
+
+    if (step === "model") {
+      const selectedModelId = parseModelSelection(input);
+
+      if (!selectedModelId) {
+        setError("Enter a model number or a valid OpenRouter model ID.");
+        return;
+      }
+
+      setModelId(selectedModelId);
       setInput("");
 
       if (process.env.LANGSMITH_API_KEY === undefined) {
@@ -130,16 +128,11 @@ export function InitSetup({ onComplete, onError }: InitSetupProps) {
         return;
       }
 
-      if (isExistingWorkflowUnchanged(workflowSetupState)) {
-        await completeSetup({
-          nextOpenAIKey: trimmedInput,
-          nextLangSmithKey: langSmithKey,
-          workflowAction: "unchanged",
-        });
-        return;
-      }
-
-      setStep("workflow");
+      await completeSetup({
+        nextLangSmithKey: langSmithKey,
+        nextModelId: selectedModelId,
+        nextOpenRouterKey: openRouterKey,
+      });
       return;
     }
 
@@ -149,94 +142,72 @@ export function InitSetup({ onComplete, onError }: InitSetupProps) {
       setLangSmithKey(nextLangSmithKey);
       setInput("");
 
-      if (isExistingWorkflowUnchanged(workflowSetupState)) {
-        await completeSetup({
-          nextOpenAIKey: openAIKey,
-          nextLangSmithKey,
-          workflowAction: "unchanged",
-        });
-        return;
-      }
-
-      setStep("workflow");
-      return;
+      await completeSetup({
+        nextLangSmithKey,
+        nextModelId: modelId,
+        nextOpenRouterKey: openRouterKey,
+      });
     }
-
-    const shouldCreateWorkflow = parseWorkflowAnswer(input);
-
-    if (shouldCreateWorkflow === null) {
-      setError("Enter yes or no.");
-      return;
-    }
-
-    await completeSetup({
-      nextOpenAIKey: openAIKey,
-      nextLangSmithKey: langSmithKey,
-      workflowAction: shouldCreateWorkflow ? "create" : "skip",
-    });
   }
 
   type CompleteSetupOptions = {
-    nextOpenAIKey: string | null;
     nextLangSmithKey: string | null;
-    workflowAction: "create" | "skip" | "unchanged";
+    nextModelId: string | null;
+    nextOpenRouterKey: string | null;
   };
 
   async function completeSetup({
-    nextOpenAIKey,
     nextLangSmithKey,
-    workflowAction,
+    nextModelId,
+    nextOpenRouterKey,
   }: CompleteSetupOptions) {
     setIsSaving(true);
 
     try {
       const updates: Record<string, string> = {};
 
-      if (nextOpenAIKey !== null) {
-        updates.OPENAI_API_KEY = nextOpenAIKey;
+      if (nextOpenRouterKey !== null) {
+        updates[OPENROUTER_API_KEY_ENV_KEY] = nextOpenRouterKey;
       }
 
-      if (nextLangSmithKey !== null && nextLangSmithKey.length > 0) {
+      if (nextModelId !== null) {
+        updates[OPENWIKI_MODEL_ID_ENV_KEY] = nextModelId;
+      }
+
+      if (nextLangSmithKey !== null) {
         updates.LANGSMITH_API_KEY = nextLangSmithKey;
-        updates.LANGCHAIN_PROJECT = "openwiki";
-        updates.LANGCHAIN_TRACING_V2 = "true";
+
+        if (nextLangSmithKey.length > 0) {
+          updates.LANGCHAIN_PROJECT = "openwiki";
+          updates.LANGCHAIN_TRACING_V2 = "true";
+        }
       }
 
       if (Object.keys(updates).length > 0) {
         await saveOpenWikiEnv(updates);
       }
 
-      const workflow =
-        workflowAction === "create"
-          ? await writeOpenWikiUpdateWorkflow()
-          : {
-              path: openWikiWorkflowPath,
-              status:
-                workflowAction === "unchanged"
-                  ? ("unchanged" as const)
-                  : ("skipped" as const),
-            };
-
       onComplete({
-        savedOpenAIKey: nextOpenAIKey !== null,
+        modelId:
+          nextModelId ??
+          modelIdOverride ??
+          process.env[OPENWIKI_MODEL_ID_ENV_KEY] ??
+          null,
         savedLangSmithKey:
           nextLangSmithKey !== null && nextLangSmithKey.length > 0,
-        workflow,
+        savedModelId: nextModelId !== null,
+        savedOpenRouterKey: nextOpenRouterKey !== null,
       });
     } catch (saveError) {
       onError(
         saveError instanceof Error
           ? saveError.message
-          : "Failed to complete OpenWiki init setup.",
+          : "Failed to complete OpenWiki credential setup.",
       );
     }
   }
 
-  const needsCredentialPrompt = needsCredentialSetup();
-  const workflowStatus =
-    workflowSetupState.status === "ready"
-      ? workflowSetupState.workflowStatus
-      : "missing";
+  const needsCredentialPrompt = needsCredentialSetup(modelIdOverride);
 
   return (
     <Box flexDirection="column">
@@ -244,19 +215,30 @@ export function InitSetup({ onComplete, onError }: InitSetupProps) {
 
       <Box flexDirection="column" marginBottom={1}>
         <SetupStep
-          label="OpenAI key"
+          label="OpenRouter key"
           state={
-            process.env.OPENAI_API_KEY
+            process.env[OPENROUTER_API_KEY_ENV_KEY]
               ? "done"
-              : step === "openai"
+              : step === "openrouter"
                 ? "current"
                 : "pending"
           }
           detail={
-            process.env.OPENAI_API_KEY
+            process.env[OPENROUTER_API_KEY_ENV_KEY]
               ? "available from environment"
               : `save to ${openWikiEnvPath}`
           }
+        />
+        <SetupStep
+          label="Model"
+          state={
+            modelIdOverride || process.env[OPENWIKI_MODEL_ID_ENV_KEY]
+              ? "done"
+              : step === "model"
+                ? "current"
+                : "pending"
+          }
+          detail={getModelSetupDetail(modelIdOverride)}
         />
         <SetupStep
           label="LangSmith"
@@ -273,24 +255,14 @@ export function InitSetup({ onComplete, onError }: InitSetupProps) {
               : "optional tracing key"
           }
         />
-        <SetupStep
-          label="GitHub Action"
-          state={
-            workflowStatus === "unchanged"
-              ? "done"
-              : step === "workflow"
-                ? "current"
-                : "pending"
-          }
-          detail={openWikiWorkflowPath}
-        />
+        <SetupStep label="OpenWiki" state="done" detail="agent setup" />
       </Box>
 
       <SetupPanel title="Prompt">
         {step ? (
           <Prompt step={step} input={input} />
         ) : (
-          <Text>Inspecting existing OpenWiki setup...</Text>
+          <Text>Inspecting OpenWiki setup...</Text>
         )}
       </SetupPanel>
 
@@ -325,9 +297,9 @@ function SetupHeader() {
         <Text bold color="cyan">
           OpenWiki
         </Text>{" "}
-        <Text color="gray">init setup</Text>
+        <Text color="gray">credential setup</Text>
       </Text>
-      <Text>Configure local credentials and scheduled updates.</Text>
+      <Text>Configure OpenRouter and local defaults.</Text>
     </Box>
   );
 }
@@ -351,7 +323,7 @@ function SetupStep({ label, state, detail }: SetupStepProps) {
   return (
     <Text>
       <Text color={color}>[{state.toUpperCase()}]</Text>{" "}
-      <Text bold>{label.padEnd(14)}</Text> <Text color="gray">{detail}</Text>
+      <Text bold>{label.padEnd(16)}</Text> <Text color="gray">{detail}</Text>
     </Text>
   );
 }
@@ -384,12 +356,38 @@ type PromptProps = {
 };
 
 function Prompt({ step, input }: PromptProps) {
-  if (step === "openai") {
+  if (step === "openrouter") {
     return (
       <Text>
-        <Text color="gray">$</Text> OPENAI_API_KEY={" "}
+        <Text color="gray">$</Text> {OPENROUTER_API_KEY_ENV_KEY}={" "}
         <Text color="yellow">{mask(input)}</Text>
       </Text>
+    );
+  }
+
+  if (step === "model") {
+    return (
+      <Box flexDirection="column">
+        <Text>
+          Choose an OpenRouter model. Enter selects {DEFAULT_MODEL_ID}.
+        </Text>
+        {SUGGESTED_MODEL_IDS.map((model, index) => (
+          <Text key={model}>
+            <Text color={model === DEFAULT_MODEL_ID ? "green" : "gray"}>
+              {`${index + 1}.`.padStart(3)}
+            </Text>{" "}
+            {model}
+            {model === DEFAULT_MODEL_ID ? (
+              <Text color="gray"> default</Text>
+            ) : null}
+          </Text>
+        ))}
+        <Text color="gray">Type a number or paste a custom model ID.</Text>
+        <Text>
+          <Text color="gray">$</Text> {OPENWIKI_MODEL_ID_ENV_KEY}={" "}
+          <Text color="yellow">{input}</Text>
+        </Text>
+      </Box>
     );
   }
 
@@ -402,51 +400,74 @@ function Prompt({ step, input }: PromptProps) {
     );
   }
 
-  return (
-    <Text>
-      <Text color="gray">$</Text> Create update GitHub Action?{" "}
-      <Text color="cyan">Y/n</Text> {input}
-    </Text>
-  );
+  return null;
 }
 
-function getInitialStep(workflowStatus: WorkflowStatus): PromptStep | null {
-  if (!process.env.OPENAI_API_KEY) {
-    return "openai";
+function getInitialStep(modelIdOverride?: string | null): PromptStep | null {
+  if (!process.env[OPENROUTER_API_KEY_ENV_KEY]) {
+    return "openrouter";
+  }
+
+  if (
+    modelIdOverride === null &&
+    process.env[OPENWIKI_MODEL_ID_ENV_KEY] === undefined
+  ) {
+    return "model";
   }
 
   if (process.env.LANGSMITH_API_KEY === undefined) {
     return "langsmith";
   }
 
-  if (workflowStatus === "unchanged") {
-    return null;
-  }
-
-  return "workflow";
+  return null;
 }
 
-function isExistingWorkflowUnchanged(
-  workflowSetupState: WorkflowSetupState,
-): boolean {
-  return (
-    workflowSetupState.status === "ready" &&
-    workflowSetupState.workflowStatus === "unchanged"
-  );
-}
-
-function parseWorkflowAnswer(value: string): boolean | null {
-  const answer = value.trim().toLowerCase();
-
-  if (answer.length === 0 || answer === "y" || answer === "yes") {
-    return true;
+function getNextStepAfterOpenRouter(
+  modelIdOverride?: string | null,
+): PromptStep | null {
+  if (
+    modelIdOverride === null &&
+    process.env[OPENWIKI_MODEL_ID_ENV_KEY] === undefined
+  ) {
+    return "model";
   }
 
-  if (answer === "n" || answer === "no") {
-    return false;
+  if (process.env.LANGSMITH_API_KEY === undefined) {
+    return "langsmith";
   }
 
   return null;
+}
+
+function getModelSetupDetail(modelIdOverride?: string | null): string {
+  if (modelIdOverride) {
+    return `using ${modelIdOverride} for this run`;
+  }
+
+  if (process.env[OPENWIKI_MODEL_ID_ENV_KEY]) {
+    return process.env[OPENWIKI_MODEL_ID_ENV_KEY] ?? "";
+  }
+
+  return `default ${DEFAULT_MODEL_ID}`;
+}
+
+function parseModelSelection(value: string): string | null {
+  const trimmedInput = value.trim();
+
+  if (trimmedInput.length === 0) {
+    return DEFAULT_MODEL_ID;
+  }
+
+  if (/^\d+$/u.test(trimmedInput)) {
+    const selectedIndex = Number(trimmedInput) - 1;
+    const selectedModelId = SUGGESTED_MODEL_IDS[selectedIndex];
+
+    return selectedModelId ?? null;
+  }
+
+  const normalizedModelId = normalizeModelId(trimmedInput);
+
+  return isValidModelId(normalizedModelId) ? normalizedModelId : null;
 }
 
 function mask(value: string): string {

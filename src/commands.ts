@@ -1,3 +1,5 @@
+import { isValidModelId, normalizeModelId } from "./constants.js";
+
 export type HelpRow = {
   label: string;
   description: string;
@@ -8,6 +10,7 @@ export type HelpContent = {
   description: string;
   usage: string[];
   commands: HelpRow[];
+  options: HelpRow[];
   developmentOptions: HelpRow[];
   examples: string[];
   developmentExamples: string[];
@@ -15,41 +18,33 @@ export type HelpContent = {
 
 export type CliCommand =
   | { kind: "help"; exitCode: 0 }
-  | { kind: "init"; exitCode: 0; dryRun: boolean }
-  | { kind: "update"; exitCode: 0; dryRun: boolean }
+  | {
+      kind: "run";
+      exitCode: 0;
+      dryRun: boolean;
+      modelId: string | null;
+      print: boolean;
+      userMessage: string | null;
+    }
   | {
       kind: "error";
       exitCode: 1;
       message: string;
     };
 
-const supportedCommands = new Set(["init", "update"]);
-
 export function parseCommand(argv: string[]): CliCommand {
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+  if (argv[0] === "--help" || argv[0] === "-h") {
     return { kind: "help", exitCode: 0 };
   }
 
-  const [command, ...args] = argv;
-
-  if (command === undefined || !supportedCommands.has(command)) {
-    return {
-      kind: "error",
-      exitCode: 1,
-      message: `Unknown command: ${command ?? ""}`.trim(),
-    };
-  }
-
-  return parseActionCommand(command as "init" | "update", args);
-}
-
-function parseActionCommand(
-  command: "init" | "update",
-  args: string[],
-): CliCommand {
   let dryRun = false;
+  let modelId: string | null = null;
+  let print = false;
+  const userMessageParts: string[] = [];
 
-  for (const arg of args) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+
     if (arg === "--help" || arg === "-h") {
       return { kind: "help", exitCode: 0 };
     }
@@ -59,7 +54,7 @@ function parseActionCommand(
         return {
           kind: "error",
           exitCode: 1,
-          message: `Unknown ${command} option: ${arg}`,
+          message: `Unknown option: ${arg}`,
         };
       }
 
@@ -67,14 +62,73 @@ function parseActionCommand(
       continue;
     }
 
-    return {
-      kind: "error",
-      exitCode: 1,
-      message: `Unknown ${command} option: ${arg}`,
-    };
+    if (arg === "--print" || arg === "-p") {
+      print = true;
+      continue;
+    }
+
+    if (arg === "--modelId" || arg === "--model-id") {
+      const nextArg = argv[index + 1];
+
+      if (!nextArg || nextArg.startsWith("-")) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: `${arg} requires a model ID.`,
+        };
+      }
+
+      const parsedModelId = normalizeModelId(nextArg);
+
+      if (!isValidModelId(parsedModelId)) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: `Invalid model ID: ${nextArg}`,
+        };
+      }
+
+      modelId = parsedModelId;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--modelId=") || arg.startsWith("--model-id=")) {
+      const [, rawModelId = ""] = arg.split("=", 2);
+      const parsedModelId = normalizeModelId(rawModelId);
+
+      if (!isValidModelId(parsedModelId)) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: `Invalid model ID: ${rawModelId}`,
+        };
+      }
+
+      modelId = parsedModelId;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      return {
+        kind: "error",
+        exitCode: 1,
+        message: `Unknown option: ${arg}`,
+      };
+    }
+
+    userMessageParts.push(arg);
   }
 
-  return { kind: command, exitCode: 0, dryRun };
+  return {
+    kind: "run",
+    exitCode: 0,
+    dryRun,
+    modelId,
+    print,
+    userMessage:
+      userMessageParts.length > 0 ? userMessageParts.join(" ") : null,
+  };
 }
 
 export function isDevelopmentMode(): boolean {
@@ -87,15 +141,22 @@ export const helpContent: HelpContent = {
   title: "OpenWiki",
   description:
     "Run a documentation agent that generates and maintains a project wiki.",
-  usage: ["openwiki <command>"],
+  usage: ["openwiki [--modelId <model>] [message]"],
   commands: [
     {
-      label: "init",
-      description: "Create initial docs in openwiki/.",
+      label: "openwiki",
+      description:
+        "Initialize openwiki/ when missing, otherwise update existing docs.",
+    },
+  ],
+  options: [
+    {
+      label: "-p, --print",
+      description: "Run once and print the final assistant output.",
     },
     {
-      label: "update",
-      description: "Refresh openwiki/ from repo changes.",
+      label: "--modelId <id>",
+      description: "Use an OpenRouter model for this run.",
     },
   ],
   developmentOptions: [
@@ -104,8 +165,13 @@ export const helpContent: HelpContent = {
       description: "Show what would run without invoking the agent.",
     },
   ],
-  examples: ["openwiki init", "openwiki update"],
-  developmentExamples: ["openwiki init --dry-run", "openwiki update --dry-run"],
+  examples: [
+    "openwiki",
+    'openwiki -p "Summarize what OpenWiki can do"',
+    "openwiki --modelId openai/gpt-5.5",
+    'openwiki --modelId openai/gpt-5.5 "Please document the API routes first"',
+  ],
+  developmentExamples: ["openwiki --dry-run"],
 };
 
 export function getHelpText(): string {
@@ -118,6 +184,9 @@ export function getHelpText(): string {
     "",
     "Commands",
     ...formatRows(helpContent.commands),
+    "",
+    "Options",
+    ...formatRows(helpContent.options),
     "",
   ];
 

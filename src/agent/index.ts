@@ -1,6 +1,10 @@
-import { initChatModel } from "langchain/chat_models/universal";
+import { createHash } from "node:crypto";
+import { chmod, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { SqliteSaver } from "@langchain/langgraph-checkpoint-sqlite";
+import { ChatOpenRouter } from "@langchain/openrouter";
 import { createDeepAgent, FilesystemBackend } from "deepagents";
-import { loadOpenWikiEnv } from "../env.js";
+import { loadOpenWikiEnv, openWikiEnvDir } from "../env.js";
 import { createSystemPrompt, createUserPrompt } from "./prompt.js";
 import type {
   OpenWikiCommand,
@@ -9,9 +13,12 @@ import type {
   OpenWikiRunResult,
 } from "./types.js";
 import {
-  MODEL_NAME,
-  OPENAI_RESPONSES_API_URL,
-  OPENAI_RESPONSES_CLIENT_BASE_URL,
+  DEFAULT_MODEL_ID,
+  isValidModelId,
+  normalizeModelId,
+  OPENROUTER_API_KEY_ENV_KEY,
+  OPENROUTER_BASE_URL,
+  OPENWIKI_MODEL_ID_ENV_KEY,
 } from "../constants.js";
 import { createRunContext, writeLastUpdateMetadata } from "./utils.js";
 
@@ -22,32 +29,37 @@ export async function runOpenWikiAgent(
 ): Promise<OpenWikiRunResult> {
   emitDebug(options, `command=${command}`);
   emitDebug(options, `cwd=${cwd}`);
-  emitDebug(options, `model=${MODEL_NAME}`);
   emitDebug(
     options,
-    "openai=modelProvider=openai useResponsesApi=true reasoning.effort=medium",
+    `userMessage=${options.userMessage ? "provided" : "not-provided"}`,
   );
+  emitDebug(options, `userMessage.followup=${options.isFollowup === true}`);
   emitDebug(
     options,
-    `openai.clientBaseUrl=${JSON.stringify(OPENAI_RESPONSES_CLIENT_BASE_URL)}`,
+    `openrouter.baseUrl=${JSON.stringify(OPENROUTER_BASE_URL)}`,
   );
   emitDebug(options, `env.beforeLoad ${formatEnvironmentDebug()}`);
 
   await loadOpenWikiEnv();
   emitDebug(options, "env=loaded ~/.openwiki/.env");
   emitDebug(options, `env.afterLoad ${formatEnvironmentDebug()}`);
-  forceOpenAIResponsesApiUrl(options);
-  emitDebug(options, `env.afterForce ${formatEnvironmentDebug()}`);
-  ensureOpenAIKey();
-  emitDebug(options, "credentials=openai key present");
+  ensureOpenRouterKey();
+  emitDebug(options, "credentials=openrouter key present");
+  const modelId = resolveModelId(options);
+  emitDebug(options, `model=${modelId}`);
 
   const context = await createRunContext(command, cwd);
   emitDebug(options, "context=created");
-  const model = await createModel();
+  const model = await createModel(modelId);
   emitDebug(options, "model=initialized");
+  const checkpointer = await createCheckpointer();
+  emitDebug(options, `checkpointer=${formatUrlDebugValue(checkpointPath)}`);
+  const threadId = createThreadId(cwd);
+  emitDebug(options, `thread=${threadId}`);
   const agent = createDeepAgent({
     model,
     tools: [],
+    checkpointer,
     backend: new FilesystemBackend({
       rootDir: cwd,
       virtualMode: true,
@@ -60,34 +72,86 @@ export async function runOpenWikiAgent(
     messages: [
       {
         role: "user",
-        content: createUserPrompt(command, context),
+        content: createRunUserMessage(command, context, options),
       },
     ],
   };
 
   emitDebug(options, "stream=opening modes=messages,tools subgraphs=true");
   const stream = await agent.stream(input, {
+    configurable: {
+      thread_id: threadId,
+    },
     streamMode: ["messages", "tools"],
     subgraphs: true,
   });
   emitDebug(options, "stream=started modes=messages,tools subgraphs=true");
+
+  let unhandledChunkCount = 0;
 
   for await (const chunk of stream) {
     const event = parseStreamEvent(chunk);
 
     if (event) {
       options.onEvent?.(event);
+    } else if (options.debug && unhandledChunkCount < 3) {
+      emitDebug(
+        options,
+        `stream.unhandledChunk ${describeStreamChunkShape(chunk)}`,
+      );
+      unhandledChunkCount += 1;
     }
   }
   emitDebug(options, "stream=completed");
+  await chmodIfExists(checkpointPath, 0o600);
 
-  await writeLastUpdateMetadata(command, cwd);
+  await writeLastUpdateMetadata(command, cwd, modelId);
   emitDebug(options, "metadata=written");
 
   return {
     command,
-    model: MODEL_NAME,
+    model: modelId,
   };
+}
+
+const checkpointPath = path.join(openWikiEnvDir, "openwiki.sqlite");
+
+function createRunUserMessage(
+  command: OpenWikiCommand,
+  context: Awaited<ReturnType<typeof createRunContext>>,
+  options: OpenWikiRunOptions,
+): string {
+  if (options.isFollowup === true && options.userMessage?.trim()) {
+    return options.userMessage.trim();
+  }
+
+  return createUserPrompt(command, context, options.userMessage ?? null);
+}
+
+async function createCheckpointer(): Promise<SqliteSaver> {
+  await mkdir(openWikiEnvDir, {
+    recursive: true,
+    mode: 0o700,
+  });
+  await chmodIfExists(openWikiEnvDir, 0o700);
+
+  return SqliteSaver.fromConnString(checkpointPath);
+}
+
+async function chmodIfExists(filePath: string, mode: number): Promise<void> {
+  try {
+    await chmod(filePath, mode);
+  } catch (error) {
+    if (!isFileNotFoundError(error)) {
+      throw error;
+    }
+  }
+}
+
+function createThreadId(cwd: string): string {
+  const digest = createHash("sha256").update(path.resolve(cwd)).digest("hex");
+
+  return `openwiki-${digest.slice(0, 32)}`;
 }
 
 function emitDebug(options: OpenWikiRunOptions, message: string): void {
@@ -101,56 +165,61 @@ function emitDebug(options: OpenWikiRunOptions, message: string): void {
   });
 }
 
-function ensureOpenAIKey(): void {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is required to run the OpenWiki agent.");
-  }
+function isFileNotFoundError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
 }
 
-function forceOpenAIResponsesApiUrl(options: OpenWikiRunOptions): void {
-  const previousBaseUrl = process.env.OPENAI_BASE_URL;
-  process.env.OPENAI_BASE_URL = OPENAI_RESPONSES_API_URL;
-
-  emitDebug(
-    options,
-    `openai.responsesApiUrl=${JSON.stringify(OPENAI_RESPONSES_API_URL)}`,
-  );
-
-  if (
-    previousBaseUrl !== undefined &&
-    previousBaseUrl !== OPENAI_RESPONSES_API_URL
-  ) {
-    emitDebug(
-      options,
-      `openai.baseUrlOverridden from ${formatUrlDebugValue(
-        previousBaseUrl,
-      )} to ${formatUrlDebugValue(OPENAI_RESPONSES_API_URL)}`,
+function ensureOpenRouterKey(): void {
+  if (!process.env[OPENROUTER_API_KEY_ENV_KEY]) {
+    throw new Error(
+      `${OPENROUTER_API_KEY_ENV_KEY} is required to run the OpenWiki agent.`,
     );
   }
 }
 
-async function createModel() {
-  return initChatModel(MODEL_NAME, {
-    modelProvider: "openai",
-    useResponsesApi: true,
-    configuration: {
-      baseURL: OPENAI_RESPONSES_CLIENT_BASE_URL,
-    },
-    reasoning: {
-      effort: "medium",
-    },
+function resolveModelId(options: OpenWikiRunOptions): string {
+  const rawModelId =
+    options.modelId ??
+    process.env[OPENWIKI_MODEL_ID_ENV_KEY] ??
+    DEFAULT_MODEL_ID;
+  const modelId = normalizeModelId(rawModelId);
+
+  if (!isValidModelId(modelId)) {
+    throw new Error(
+      `Invalid OpenRouter model ID configured in ${OPENWIKI_MODEL_ID_ENV_KEY}.`,
+    );
+  }
+
+  return modelId;
+}
+
+async function createModel(modelId: string) {
+  return new ChatOpenRouter({
+    apiKey: process.env[OPENROUTER_API_KEY_ENV_KEY],
+    baseURL: OPENROUTER_BASE_URL,
+    model: modelId,
+    siteName: "OpenWiki",
   });
 }
 
+type NormalizedStreamEvent = {
+  mode: string;
+  payload: unknown;
+};
+
 function parseStreamEvent(chunk: unknown): OpenWikiRunEvent | null {
-  if (!Array.isArray(chunk) || chunk.length < 2) {
+  const streamEvent = normalizeStreamEvent(chunk);
+
+  if (!streamEvent) {
     return null;
   }
 
-  const [mode, payload] = normalizeStreamChunk(chunk);
-
-  if (mode === "messages") {
-    const text = extractMessageText(payload);
+  if (streamEvent.mode === "messages") {
+    const text = extractMessageText(streamEvent.payload);
 
     return text.length > 0
       ? {
@@ -160,18 +229,47 @@ function parseStreamEvent(chunk: unknown): OpenWikiRunEvent | null {
       : null;
   }
 
-  if (mode === "tools") {
-    const toolCall = formatToolStart(payload);
-
-    return toolCall
-      ? {
-          type: "tool_call",
-          call: toolCall,
-        }
-      : null;
+  if (streamEvent.mode === "tools") {
+    return parseToolStreamEvent(streamEvent.payload);
   }
 
   return null;
+}
+
+function normalizeStreamEvent(chunk: unknown): NormalizedStreamEvent | null {
+  if (Array.isArray(chunk)) {
+    if (chunk.length < 2) {
+      return null;
+    }
+
+    const [mode, payload] = normalizeStreamChunk(chunk);
+
+    return typeof mode === "string" ? { mode, payload } : null;
+  }
+
+  if (!isRecord(chunk)) {
+    return null;
+  }
+
+  const toolEvent = getStringRecordValue(chunk, "event");
+
+  if (toolEvent?.startsWith("on_tool_")) {
+    return {
+      mode: "tools",
+      payload: chunk,
+    };
+  }
+
+  const method = getStringRecordValue(chunk, "method");
+
+  if (!method) {
+    return null;
+  }
+
+  return {
+    mode: method,
+    payload: getProtocolEventPayload(chunk),
+  };
 }
 
 function normalizeStreamChunk(chunk: unknown[]): [unknown, unknown] {
@@ -183,27 +281,204 @@ function normalizeStreamChunk(chunk: unknown[]): [unknown, unknown] {
 }
 
 function extractMessageText(payload: unknown): string {
-  if (Array.isArray(payload)) {
-    const [message] = payload;
-    return extractContentText(getRecordValue(message, "content"));
-  }
-
-  return extractContentText(getRecordValue(payload, "content"));
+  return extractMessageTextValue(payload, new Set());
 }
 
-function extractContentText(content: unknown): string {
+function extractMessageTextValue(payload: unknown, seen: Set<object>): string {
+  if (typeof payload === "string") {
+    return payload;
+  }
+
+  if (Array.isArray(payload)) {
+    if (payload.length === 2 && isStreamMessageTuplePayload(payload)) {
+      return extractMessageTextValue(payload[0], seen);
+    }
+
+    for (const item of payload) {
+      const text = extractMessageTextValue(item, seen);
+
+      if (text.length > 0) {
+        return text;
+      }
+    }
+
+    return payload.map((item) => extractContentBlockText(item, seen)).join("");
+  }
+
+  if (!isRecord(payload) || seen.has(payload)) {
+    return "";
+  }
+
+  seen.add(payload);
+
+  const protocolText = extractProtocolMessageText(payload, seen);
+
+  if (protocolText !== null) {
+    return protocolText;
+  }
+
+  if (isRecord(payload.chunk)) {
+    const text = extractMessageTextValue(payload.chunk, seen);
+
+    if (text.length > 0) {
+      return text;
+    }
+  }
+
+  if (isRecord(payload.message)) {
+    const text = extractMessageTextValue(payload.message, seen);
+
+    if (text.length > 0) {
+      return text;
+    }
+  }
+
+  if (!shouldReadMessageRecord(payload)) {
+    return "";
+  }
+
+  const contentText = extractContentText(payload.content, seen);
+
+  if (contentText.length > 0) {
+    return contentText;
+  }
+
+  for (const key of [
+    "text",
+    "output",
+    "generations",
+    "messages",
+    "kwargs",
+    "lc_kwargs",
+  ]) {
+    const text = extractMessageTextValue(payload[key], seen);
+
+    if (text.length > 0) {
+      return text;
+    }
+  }
+
+  return "";
+}
+
+function isStreamMessageTuplePayload(payload: unknown[]): boolean {
+  const [message, metadata] = payload;
+
+  if (!isRecord(metadata) || !isMessageLikeRecord(message)) {
+    return false;
+  }
+
+  if (
+    "langgraph_node" in metadata ||
+    "run_id" in metadata ||
+    "tags" in metadata ||
+    "metadata" in metadata
+  ) {
+    return true;
+  }
+
+  return (
+    "langgraph_node" in message ||
+    "checkpoint_ns" in message ||
+    "thread_id" in message
+  );
+}
+
+function isMessageLikeRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    "content" in value ||
+    "text" in value ||
+    "kwargs" in value ||
+    "lc_kwargs" in value ||
+    typeof value._getType === "function" ||
+    getMessageRole(value) !== null ||
+    hasSerializedMessageId(value)
+  );
+}
+
+function extractProtocolMessageText(
+  payload: Record<string, unknown>,
+  seen: Set<object>,
+): string | null {
+  const event = getStringRecordValue(payload, "event");
+
+  if (!event) {
+    return null;
+  }
+
+  if (event === "content-block-delta") {
+    return extractContentDeltaText(payload.delta, seen);
+  }
+
+  if (event === "content-block-start") {
+    return extractContentText(payload.content, seen);
+  }
+
+  if (
+    event === "message-start" ||
+    event === "message-finish" ||
+    event === "content-block-finish" ||
+    event === "error"
+  ) {
+    return "";
+  }
+
+  return null;
+}
+
+function extractContentText(content: unknown, seen: Set<object>): string {
   if (typeof content === "string") {
     return content;
   }
 
-  if (!Array.isArray(content)) {
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => extractContentBlockText(block, seen))
+      .join("");
+  }
+
+  if (isRecord(content)) {
+    return extractContentBlockText(content, seen);
+  }
+
+  return "";
+}
+
+function extractContentDeltaText(delta: unknown, seen: Set<object>): string {
+  if (typeof delta === "string") {
+    return delta;
+  }
+
+  if (!isRecord(delta)) {
     return "";
   }
 
-  return content.map(extractContentBlockText).join("");
+  const type = getStringRecordValue(delta, "type");
+
+  if (type === "text-delta") {
+    return typeof delta.text === "string" ? delta.text : "";
+  }
+
+  if (type === "block-delta") {
+    return extractContentBlockText(delta.fields, seen);
+  }
+
+  if (typeof delta.text === "string") {
+    return delta.text;
+  }
+
+  if (typeof delta.delta === "string") {
+    return delta.delta;
+  }
+
+  return "";
 }
 
-function extractContentBlockText(block: unknown): string {
+function extractContentBlockText(block: unknown, seen: Set<object>): string {
   if (typeof block === "string") {
     return block;
   }
@@ -212,19 +487,174 @@ function extractContentBlockText(block: unknown): string {
     return "";
   }
 
-  const text = block.text ?? block.content;
+  const type = getStringRecordValue(block, "type");
 
-  return typeof text === "string" ? text : "";
+  if (type?.includes("tool") || type?.includes("reasoning")) {
+    return "";
+  }
+
+  for (const key of ["text", "content", "output_text"]) {
+    const text = block[key];
+
+    if (typeof text === "string") {
+      return text;
+    }
+  }
+
+  if (isRecord(block.fields)) {
+    return extractContentBlockText(block.fields, seen);
+  }
+
+  if (isRecord(block.delta)) {
+    return extractContentDeltaText(block.delta, seen);
+  }
+
+  return "";
 }
 
-function formatToolStart(payload: unknown): string | null {
-  if (!isRecord(payload) || payload.event !== "on_tool_start") {
+function shouldReadMessageRecord(value: Record<string, unknown>): boolean {
+  const role = getMessageRole(value);
+
+  return role === null || role === "ai" || role === "assistant";
+}
+
+function getMessageRole(value: Record<string, unknown>): string | null {
+  for (const key of ["role", "type"]) {
+    const role = getStringRecordValue(value, key);
+
+    if (isMessageRole(role)) {
+      return role;
+    }
+  }
+
+  const serializedType = getSerializedMessageType(value);
+
+  if (serializedType === "AIMessage" || serializedType === "AIMessageChunk") {
+    return "ai";
+  }
+
+  if (
+    serializedType === "HumanMessage" ||
+    serializedType === "SystemMessage" ||
+    serializedType === "ToolMessage"
+  ) {
+    return serializedType.replace("Message", "").toLowerCase();
+  }
+
+  const getType = value._getType;
+
+  if (typeof getType !== "function") {
     return null;
   }
 
-  const name = typeof payload.name === "string" ? payload.name : "tool";
+  try {
+    const role = getType.call(value);
 
-  return `${name}(${formatToolArgs(payload.input)})`;
+    return isMessageRole(role) ? role : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasSerializedMessageId(value: Record<string, unknown>): boolean {
+  return getSerializedMessageType(value) !== null;
+}
+
+function getSerializedMessageType(
+  value: Record<string, unknown>,
+): string | null {
+  if (!Array.isArray(value.id)) {
+    return null;
+  }
+
+  return (
+    value.id
+      .filter((part): part is string => typeof part === "string")
+      .at(-1) ?? null
+  );
+}
+
+function isMessageRole(value: unknown): value is string {
+  return (
+    value === "ai" ||
+    value === "assistant" ||
+    value === "human" ||
+    value === "system" ||
+    value === "tool"
+  );
+}
+
+function getProtocolEventPayload(event: Record<string, unknown>): unknown {
+  const params = event.params;
+
+  if (isRecord(params) && "data" in params) {
+    return params.data;
+  }
+
+  if ("data" in event) {
+    return event.data;
+  }
+
+  if ("payload" in event) {
+    return event.payload;
+  }
+
+  return event;
+}
+
+function parseToolStreamEvent(payload: unknown): OpenWikiRunEvent | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  const event = getStringRecordValue(payload, "event");
+
+  if (event === "on_tool_start" || event === "tool-started") {
+    const name =
+      getStringRecordValue(payload, "name") ??
+      getStringRecordValue(payload, "tool_name") ??
+      "tool";
+    const id =
+      getStringRecordValue(payload, "toolCallId") ??
+      getStringRecordValue(payload, "tool_call_id") ??
+      createSyntheticToolCallId(name, payload.input);
+
+    return {
+      type: "tool_start",
+      call: `${name}(${formatToolArgs(payload.input)})`,
+      id,
+      input: payload.input,
+      name,
+    };
+  }
+
+  if (
+    event === "on_tool_end" ||
+    event === "tool-finished" ||
+    event === "on_tool_error" ||
+    event === "tool-error"
+  ) {
+    const name =
+      getStringRecordValue(payload, "name") ??
+      getStringRecordValue(payload, "tool_name") ??
+      "tool";
+    const id =
+      getStringRecordValue(payload, "toolCallId") ??
+      getStringRecordValue(payload, "tool_call_id") ??
+      createSyntheticToolCallId(name, payload.input);
+
+    return {
+      type: "tool_end",
+      id,
+      name,
+      status:
+        event === "on_tool_error" || event === "tool-error"
+          ? "error"
+          : "finished",
+    };
+  }
+
+  return null;
 }
 
 function formatToolArgs(input: unknown): string {
@@ -267,19 +697,51 @@ function parseStringifiedJson(value: unknown): unknown {
   }
 }
 
-function getRecordValue(value: unknown, key: string): unknown {
-  return isRecord(value) ? value[key] : undefined;
+function createSyntheticToolCallId(name: string, input: unknown): string {
+  return `${name}:${formatToolValue(input)}`;
+}
+
+function getStringRecordValue(
+  value: Record<string, unknown>,
+  key: string,
+): string | null {
+  return typeof value[key] === "string" ? value[key] : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function describeStreamChunkShape(chunk: unknown): string {
+  if (Array.isArray(chunk)) {
+    return `array(length=${chunk.length}, items=${chunk
+      .slice(0, 3)
+      .map(describeValueShape)
+      .join(",")})`;
+  }
+
+  return describeValueShape(chunk);
+}
+
+function describeValueShape(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `array(length=${value.length})`;
+  }
+
+  if (isRecord(value)) {
+    const keys = Object.keys(value);
+    const suffix = keys.length > 8 ? ",..." : "";
+
+    return `object(keys=${keys.slice(0, 8).join(",")}${suffix})`;
+  }
+
+  return typeof value;
+}
+
 function formatEnvironmentDebug(): string {
   const keys = [
-    "OPENAI_BASE_URL",
-    "OPENAI_ORG_ID",
-    "OPENAI_PROJECT",
+    OPENROUTER_API_KEY_ENV_KEY,
+    OPENWIKI_MODEL_ID_ENV_KEY,
     "LANGCHAIN_TRACING_V2",
     "LANGCHAIN_PROJECT",
     "LANGCHAIN_ENDPOINT",
@@ -295,8 +757,16 @@ function formatDebugValue(key: string, value: string | undefined): string {
     return "unset";
   }
 
-  if (key === "OPENAI_BASE_URL" || key === "LANGCHAIN_ENDPOINT") {
+  if (key === "LANGCHAIN_ENDPOINT") {
     return formatUrlDebugValue(value);
+  }
+
+  if (key.endsWith("_API_KEY")) {
+    return `set(length=${value.length})`;
+  }
+
+  if (key === OPENWIKI_MODEL_ID_ENV_KEY) {
+    return `set(value=${JSON.stringify(value)})`;
   }
 
   if (value.length <= 10) {

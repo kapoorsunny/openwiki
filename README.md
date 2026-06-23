@@ -11,11 +11,14 @@ npm install -g openwiki
 ## Usage
 
 ```sh
-openwiki init
-openwiki update
+openwiki
+openwiki -p "Summarize what you can do"
+openwiki --modelId openai/gpt-5.5
+openwiki "Please document the API routes first"
 ```
 
-`init` creates initial documentation in `openwiki/`. `update` refreshes that documentation from repository changes.
+`openwiki` creates initial documentation in `openwiki/` when no wiki exists. If `openwiki/` already exists, it refreshes that documentation from repository changes. By default, the CLI stays open after each run so you can send follow-up messages. Use `-p` or `--print` for a one-shot non-interactive run that prints the final assistant output.
 
-On first interactive `init`, OpenWiki asks for an OpenAI API key and saves it to `~/.openwiki/.env`. A LangSmith API key can also be provided optionally.
-Interactive `init` also asks whether to create `.github/workflows/openwiki-update.yml`, which runs `openwiki update` once per day at midnight PST.
+On the first interactive run, OpenWiki asks for an OpenRouter API key, lets you pick a default model, and saves both to `~/.openwiki/.env`. A LangSmith API key can also be provided optionally.
+
+See `examples/openwiki-update.yml` for a GitHub Actions workflow you can copy into a repository for scheduled updates.

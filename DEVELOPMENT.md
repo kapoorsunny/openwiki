@@ -28,16 +28,17 @@ Run a dry test from the repo you want OpenWiki to inspect:
 
 ```sh
 cd /path/to/target/repo
-OPENWIKI_DEV=1 openwiki init --dry-run
-OPENWIKI_DEV=1 openwiki update --dry-run
+OPENWIKI_DEV=1 openwiki --dry-run
 ```
 
 Run the real CLI from the target repo:
 
 ```sh
 cd /path/to/target/repo
-openwiki init
-openwiki update
+openwiki
+openwiki -p "Summarize what you can do"
+openwiki --modelId openai/gpt-5.5
+openwiki "Please focus on API documentation"
 ```
 
 The target repo is still the current working directory. The global link only
@@ -62,5 +63,8 @@ The existing global link will keep using the rebuilt `dist/cli.js`.
 Real runs can write:
 
 - `openwiki/`
-- `.github/workflows/openwiki-update.yml` if selected during interactive `init`
-- `~/.openwiki/.env` for local OpenAI and optional LangSmith credentials
+- `~/.openwiki/.env` for local OpenRouter model/key settings and optional LangSmith credentials
+
+Scheduled update workflow example:
+
+- `examples/openwiki-update.yml`

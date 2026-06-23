@@ -69,18 +69,23 @@ export function createModeInstructions(command: OpenWikiCommand): string {
 export function createUserPrompt(
   command: OpenWikiCommand,
   context: RunContext,
+  userMessage: string | null = null,
 ): string {
   if (command === "init") {
-    return `
+    return appendUserMessage(
+      `
 Initialize OpenWiki documentation for this repository.
 
 Inspect the project thoroughly, identify the major technical and business domains, and write the initial documentation under ${OPEN_WIKI_DIR}/.
 
 Start with ${OPEN_WIKI_DIR}/quickstart.md as the entrypoint. Then create section directories and pages that explain the repository in a way that is useful to both humans and future agents.
-`.trim();
+`.trim(),
+      userMessage,
+    );
   }
 
-  return `
+  return appendUserMessage(
+    `
 Update the existing OpenWiki documentation for this repository.
 
 Inspect ${OPEN_WIKI_DIR}/, identify recent source changes, and refresh the documentation so it remains accurate and complete. Use the git evidence below when available. The CLI will update ${UPDATE_METADATA_PATH} after you finish.
@@ -90,5 +95,20 @@ ${formatLastUpdate(context.lastUpdate)}
 
 Git change summary:
 ${context.gitSummary}
+`.trim(),
+    userMessage,
+  );
+}
+
+function appendUserMessage(prompt: string, userMessage: string | null): string {
+  if (userMessage === null || userMessage.trim().length === 0) {
+    return prompt;
+  }
+
+  return `
+${prompt}
+
+Additional user instruction:
+${userMessage.trim()}
 `.trim();
 }

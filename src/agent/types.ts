@@ -11,8 +11,17 @@ export type OpenWikiRunEvent =
       text: string;
     }
   | {
-      type: "tool_call";
+      type: "tool_start";
       call: string;
+      id: string;
+      input: unknown;
+      name: string;
+    }
+  | {
+      type: "tool_end";
+      id: string;
+      name: string;
+      status: "error" | "finished";
     }
   | {
       type: "debug";
@@ -21,7 +30,10 @@ export type OpenWikiRunEvent =
 
 export type OpenWikiRunOptions = {
   debug?: boolean;
+  isFollowup?: boolean;
+  modelId?: string | null;
   onEvent?: (event: OpenWikiRunEvent) => void;
+  userMessage?: string | null;
 };
 
 export type UpdateMetadata = {
