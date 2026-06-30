@@ -59,8 +59,9 @@ Root agent instruction files:
 - Only consider top-level /AGENTS.md and /CLAUDE.md for this step. Do not edit nested AGENTS.md or CLAUDE.md files.
 - If /AGENTS.md or /CLAUDE.md exists, add or update the OpenWiki reference section there. If both exist, ensure the same section is added to both (duplicated).
 - If neither exists, create top-level /AGENTS.md containing only the OpenWiki reference section.
-- During update runs, inspect any existing OpenWiki reference section in /AGENTS.md and/or /CLAUDE.md and refresh it if the structure, link, or wording is stale. This check is required even when the wiki itself is otherwise current.
+- During update runs, inspect any existing OpenWiki reference section in /AGENTS.md and/or /CLAUDE.md and refresh it only if the section is missing or semantically stale. This check is required even when the wiki itself is otherwise current.
 - Preserve surrounding instructions in existing files. Replace/update an existing OpenWiki reference section instead of adding duplicates.
+- Do not edit /AGENTS.md or /CLAUDE.md only to normalize formatting, blank lines, wrapping, or punctuation if the existing OpenWiki section is already semantically correct.
 - Use this exact section structure every time:
 
 \`\`\`markdown
@@ -102,6 +103,8 @@ Documentation goals:
 - Prefer clear Markdown with stable links between pages.
 - Organize the docs like human documentation, not a raw file inventory.
 - Include change-oriented guidance for future agents: where to start, what to watch out for, and which tests or checks are relevant when changing each major area.
+- Keep the docs concise enough to maintain. Avoid repeating the same concept across pages; give each concept one canonical home and link to it from other pages when needed.
+- Use git history for discovery, but do not include persistent commit hash lists in documentation unless a specific historical decision is important for future work.
 
 Section quality rules:
 - Do not create a directory unless it represents a real documentation area.
@@ -110,15 +113,17 @@ Section quality rules:
 - Prefer headings inside broader pages before creating many small directories.
 - Each page should provide real explanatory value: what the area does, why it exists, where to start, what to watch out for, and key source references.
 - Before finishing an init or update run, review the ${OPEN_WIKI_DIR}/ tree. Merge, move, or remove low-value single-file directories and stub pages so the wiki remains easy to navigate and maintain.
+- For small repositories with about 10 or fewer primary source files, prefer ${OPEN_WIKI_DIR}/quickstart.md plus at most 1-2 supporting pages. Avoid one-file section directories unless the boundary is clearly useful and likely to grow.
+- Avoid splitting content into separate topic pages unless there is enough distinct, repository-specific behavior to justify the split.
 
 Required documentation structure:
 - ${OPEN_WIKI_DIR}/quickstart.md must be the entrypoint.
 - ${OPEN_WIKI_DIR}/quickstart.md must include a high-level repository overview and links to every major section.
 - When writing required documentation with filesystem tools, use /openwiki/... paths, for example /openwiki/quickstart.md.
-- Create one directory per major section, for example architecture/, workflows/, domain/, api/, data-models/, operations/, integrations/, testing/, or similar names that fit the repo.
-- Each section directory should contain focused Markdown pages.
+- When the repository is large enough to need section directories, create one directory per major section, for example architecture/, workflows/, domain/, api/, data-models/, operations/, integrations/, testing/, or similar names that fit the repo.
+- Each section directory should contain focused Markdown pages; if a directory would contain only one short page, prefer a broader page or a heading in ${OPEN_WIKI_DIR}/quickstart.md.
 - Include source-file references inline where they help readers verify or continue exploring.
-- Each substantive page should include a short Source Map or equivalent section listing the most important source files, existing docs, and git evidence used for that page.
+- Source Map sections are optional. Add one only when it materially improves navigation for that page. Prefer inline source references for short pages.
 - Track the last successful documentation update in ${UPDATE_METADATA_PATH}.
 
 Mode-specific behavior:
@@ -156,8 +161,15 @@ export function createModeInstructions(command: OpenWikiCommand): string {
 - Inspect the existing ${OPEN_WIKI_DIR}/ documentation before editing.
 - Read ${UPDATE_METADATA_PATH} if it exists.
 - Always use git-oriented repository evidence to understand recent changes. Inspect commits added since the previous successful run using the recorded gitHead when available. If shell execution is unavailable, use filesystem timestamps, source inspection, and existing docs to infer what changed.
-- Preserve useful existing structure and wording when it remains accurate.
-- Update stale pages, add missing pages, remove obsolete claims, and keep quickstart links accurate.
+- Before editing, build a docs impact plan from the changed source files: source change -> docs affected -> edit needed -> why. If a page cannot be tied to a relevant source, workflow, product, or existing-doc change, do not edit it.
+- Update runs must be surgical. Preserve useful existing structure and wording when it remains accurate. Prefer replacing one stale sentence over adding new paragraphs.
+- Only edit pages whose current content is inaccurate, incomplete, or misleading because of the recent changes. Do not refresh every page.
+- Keep each concept in one canonical page. If the same detail appears in multiple pages, keep the detailed explanation in the canonical page and make other mentions brief or link-only.
+- Do not make formatting-only edits. Do not reformat Markdown tables, normalize blank lines, reorder source lists, or polish wording unless the surrounding content is already being changed for accuracy.
+- Do not update Source Map sections, git evidence lists, or generic "things to watch" sections during an update unless they are materially wrong because of the source changes.
+- Do not include or refresh persistent commit hash lists unless a specific commit explains an important historical decision.
+- Use a soft diff budget: if fewer than about 5 source files changed, update at most 1-2 wiki pages. Avoid touching quickstart unless the top-level product behavior, setup, or navigation changed. If you believe more than 3 wiki pages need edits, think very deeply on why before making broad changes.
+- Update stale pages, add missing pages, remove obsolete claims, and keep quickstart links accurate only when needed by the docs impact plan.
 - Updates may be a no-op. If there are no relevant source, workflow, product, or existing-doc changes since the previous successful run, and the current wiki is already accurate, do not edit files. Say that the wiki is already current.
 - The CLI will record successful run metadata in ${UPDATE_METADATA_PATH} after you finish.
 `.trim();
@@ -192,7 +204,7 @@ ${context.gitSummary}
     `
 Update the existing OpenWiki documentation for this repository.
 
-Inspect ${OPEN_WIKI_DIR}/, identify recent source changes, and refresh the documentation only if changes are needed for accuracy or completeness. Use the git evidence below when available. If the wiki is already current, do not edit files. The CLI will update ${UPDATE_METADATA_PATH} only when OpenWiki content changes.
+Inspect ${OPEN_WIKI_DIR}/, identify recent source changes, and refresh only the documentation pages directly affected by those changes. Use the git evidence below when available. Keep edits surgical: do not rewrite accurate sections, do not update source maps or git evidence just to refresh them, and do not make formatting-only changes. If the wiki is already current, do not edit files. The CLI will update ${UPDATE_METADATA_PATH} only when OpenWiki content changes.
 
 Last update metadata:
 ${formatLastUpdate(context.lastUpdate)}
