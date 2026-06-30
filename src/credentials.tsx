@@ -8,7 +8,6 @@ import {
   getProviderModelOptions,
   isValidModelId,
   normalizeModelId,
-  normalizeProvider,
   OPENWIKI_MODEL_ID_ENV_KEY,
   OPENWIKI_PROVIDER_ENV_KEY,
   type OpenWikiProvider,
@@ -61,6 +60,18 @@ export function InitSetup({
   const [modelId, setModelId] = useState<string | null>(null);
   const [langSmithKey, setLangSmithKey] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [providerSelectionIndex, setProviderSelectionIndex] = useState(() =>
+    getProviderSelectionIndex(initialProvider),
+  );
+  const [modelSelectionIndex, setModelSelectionIndex] = useState(() =>
+    getModelSelectionIndex(
+      initialProvider,
+      modelIdOverride ??
+        process.env[OPENWIKI_MODEL_ID_ENV_KEY] ??
+        getDefaultModelId(initialProvider),
+    ),
+  );
+  const [isCustomModelInput, setIsCustomModelInput] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -81,11 +92,61 @@ export function InitSetup({
     }
 
     setProvider(initialProvider);
+    setProviderSelectionIndex(getProviderSelectionIndex(initialProvider));
+    setModelSelectionIndex(
+      getModelSelectionIndex(
+        initialProvider,
+        modelIdOverride ??
+          process.env[OPENWIKI_MODEL_ID_ENV_KEY] ??
+          getDefaultModelId(initialProvider),
+      ),
+    );
+    setIsCustomModelInput(false);
     setStep(initialStep);
   }, [initialProvider, modelIdOverride, onComplete]);
 
   useInput((inputValue, key) => {
     if (isSaving || step === null) {
+      return;
+    }
+
+    if (step === "provider") {
+      if (key.upArrow || key.downArrow) {
+        setError(null);
+        setProviderSelectionIndex((index) =>
+          moveSelectionIndex(
+            index,
+            key.upArrow ? -1 : 1,
+            SELECTABLE_OPENWIKI_PROVIDERS.length,
+          ),
+        );
+        return;
+      }
+
+      if (key.return) {
+        void submit();
+      }
+
+      return;
+    }
+
+    if (step === "model" && !isCustomModelInput) {
+      if (key.upArrow || key.downArrow) {
+        setError(null);
+        setModelSelectionIndex((index) =>
+          moveSelectionIndex(
+            index,
+            key.upArrow ? -1 : 1,
+            getModelSelectionOptions(provider).length,
+          ),
+        );
+        return;
+      }
+
+      if (key.return) {
+        void submit();
+      }
+
       return;
     }
 
@@ -99,8 +160,10 @@ export function InitSetup({
       return;
     }
 
-    if (inputValue && !key.ctrl && !key.meta) {
-      setInput((value) => value + inputValue);
+    const sanitizedInput = sanitizeInputChunk(inputValue);
+
+    if (sanitizedInput && !key.ctrl && !key.meta) {
+      setInput((value) => value + sanitizedInput);
     }
   });
 
@@ -108,14 +171,19 @@ export function InitSetup({
     setError(null);
 
     if (step === "provider") {
-      const selectedProvider = parseProviderSelection(input);
-
-      if (!selectedProvider) {
-        setError("Enter a provider number or a valid provider ID.");
-        return;
-      }
+      const selectedProvider =
+        SELECTABLE_OPENWIKI_PROVIDERS[providerSelectionIndex] ??
+        DEFAULT_PROVIDER;
 
       setProvider(selectedProvider);
+      setProviderSelectionIndex(getProviderSelectionIndex(selectedProvider));
+      setModelSelectionIndex(
+        getModelSelectionIndex(
+          selectedProvider,
+          getDefaultModelId(selectedProvider),
+        ),
+      );
+      setIsCustomModelInput(false);
       setInput("");
       const nextStep = getNextStepAfterProvider(
         selectedProvider,
@@ -163,15 +231,27 @@ export function InitSetup({
     }
 
     if (step === "model") {
-      const selectedModelId = parseModelSelection(input, provider);
+      const selectedModelId = getSelectedModelId(
+        provider,
+        modelSelectionIndex,
+        input,
+        isCustomModelInput,
+      );
 
       if (!selectedModelId) {
-        setError("Enter a model number or a valid model ID.");
+        setError("Paste a valid model ID.");
+        return;
+      }
+
+      if (selectedModelId === "custom") {
+        setIsCustomModelInput(true);
+        setInput("");
         return;
       }
 
       setModelId(selectedModelId);
       setInput("");
+      setIsCustomModelInput(false);
 
       if (process.env.LANGSMITH_API_KEY === undefined) {
         setStep("langsmith");
@@ -333,7 +413,14 @@ export function InitSetup({
 
       <SetupPanel title="Prompt">
         {step ? (
-          <Prompt input={input} provider={provider} step={step} />
+          <Prompt
+            input={input}
+            isCustomModelInput={isCustomModelInput}
+            modelSelectionIndex={modelSelectionIndex}
+            provider={provider}
+            providerSelectionIndex={providerSelectionIndex}
+            step={step}
+          />
         ) : (
           <Text>Inspecting OpenWiki setup...</Text>
         )}
@@ -425,22 +512,28 @@ function SetupPanel({ title, children }: SetupPanelProps) {
 
 type PromptProps = {
   input: string;
+  isCustomModelInput: boolean;
+  modelSelectionIndex: number;
   provider: OpenWikiProvider;
+  providerSelectionIndex: number;
   step: PromptStep;
 };
 
-function Prompt({ input, provider, step }: PromptProps) {
+function Prompt({
+  input,
+  isCustomModelInput,
+  modelSelectionIndex,
+  provider,
+  providerSelectionIndex,
+  step,
+}: PromptProps) {
   if (step === "provider") {
     return (
       <Box flexDirection="column">
-        <Text>Choose a model provider. Enter selects {DEFAULT_PROVIDER}.</Text>
+        <Text>Choose a model provider.</Text>
         {SELECTABLE_OPENWIKI_PROVIDERS.map((providerOption, index) => (
           <Text key={providerOption}>
-            <Text
-              color={providerOption === DEFAULT_PROVIDER ? "green" : "gray"}
-            >
-              {`${index + 1}.`.padStart(3)}
-            </Text>{" "}
+            <SelectionMarker isSelected={index === providerSelectionIndex} />{" "}
             {getProviderLabel(providerOption)}
             <Text color="gray"> ({providerOption})</Text>
             {providerOption === DEFAULT_PROVIDER ? (
@@ -448,51 +541,65 @@ function Prompt({ input, provider, step }: PromptProps) {
             ) : null}
           </Text>
         ))}
-        <Text color="gray">Type a number or provider ID.</Text>
-        <Text>
-          <Text color="gray">$</Text> {OPENWIKI_PROVIDER_ENV_KEY}={" "}
-          <Text color="yellow">{input}</Text>
-        </Text>
+        <Text color="gray">Use up/down arrows, then press Enter.</Text>
       </Box>
     );
   }
 
   if (step === "api-key") {
     return (
-      <Text>
-        <Text color="gray">$</Text> {getProviderApiKeyEnvKey(provider)}={" "}
-        <Text color="yellow">{mask(input)}</Text>
-      </Text>
+      <Box flexDirection="column">
+        <Text>Paste your {getProviderLabel(provider)} API key.</Text>
+        <Text>
+          <Text color="gray">$</Text> {getProviderApiKeyEnvKey(provider)}={" "}
+          <Text color="yellow">{mask(input)}</Text>
+        </Text>
+        <Text color="gray">Press Enter to save it.</Text>
+      </Box>
     );
   }
 
   if (step === "model") {
+    if (isCustomModelInput) {
+      return (
+        <Box flexDirection="column">
+          <Text>Paste a custom model ID.</Text>
+          <Text>
+            <Text color="gray">$</Text> {OPENWIKI_MODEL_ID_ENV_KEY}={" "}
+            <Text color="yellow">{input}</Text>
+          </Text>
+          <Text color="gray">Press Enter to save it.</Text>
+        </Box>
+      );
+    }
+
     return (
       <Box flexDirection="column">
         <Text>
-          Choose a {getProviderLabel(provider)} model. Enter selects{" "}
-          {getDefaultModelId(provider)}.
+          Choose {getProviderArticle(provider)} {getProviderLabel(provider)}{" "}
+          model.
         </Text>
-        {getProviderModelOptions(provider).map((model, index) => (
-          <Text key={model.id}>
-            <Text
-              color={
-                model.id === getDefaultModelId(provider) ? "green" : "gray"
-              }
-            >
-              {`${index + 1}.`.padStart(3)}
-            </Text>{" "}
-            {model.label} <Text color="gray">{model.id}</Text>
-            {model.id === getDefaultModelId(provider) ? (
-              <Text color="gray"> default</Text>
-            ) : null}
-          </Text>
-        ))}
-        <Text color="gray">Type a number or paste a custom model ID.</Text>
-        <Text>
-          <Text color="gray">$</Text> {OPENWIKI_MODEL_ID_ENV_KEY}={" "}
-          <Text color="yellow">{input}</Text>
-        </Text>
+        {getModelSelectionOptions(provider).map((option, index) => {
+          if (option.kind === "custom") {
+            return (
+              <Text key="custom">
+                <SelectionMarker isSelected={index === modelSelectionIndex} />{" "}
+                Custom model ID
+              </Text>
+            );
+          }
+
+          return (
+            <Text key={option.id}>
+              <SelectionMarker isSelected={index === modelSelectionIndex} />{" "}
+              {option.label} <Text color="gray">{option.id}</Text>
+              {option.id === getDefaultModelId(provider) ? (
+                <Text color="gray"> default</Text>
+              ) : null}
+            </Text>
+          );
+        })}
+        <Text color="gray">Use up/down arrows, then press Enter.</Text>
       </Box>
     );
   }
@@ -507,6 +614,12 @@ function Prompt({ input, provider, step }: PromptProps) {
   }
 
   return null;
+}
+
+function SelectionMarker({ isSelected }: { isSelected: boolean }) {
+  return (
+    <Text color={isSelected ? "cyan" : "gray"}>{isSelected ? ">" : " "}</Text>
+  );
 }
 
 function getInitialStep(
@@ -587,45 +700,87 @@ function getModelSetupDetail(
   return `default ${getDefaultModelId(provider)}`;
 }
 
-function parseProviderSelection(value: string): OpenWikiProvider | null {
-  const trimmedInput = value.trim();
+type ModelSelectionOption =
+  | {
+      id: string;
+      kind: "preset";
+      label: string;
+    }
+  | {
+      kind: "custom";
+    };
 
-  if (trimmedInput.length === 0) {
-    return DEFAULT_PROVIDER;
-  }
-
-  if (/^\d+$/u.test(trimmedInput)) {
-    const selectedIndex = Number(trimmedInput) - 1;
-
-    return SELECTABLE_OPENWIKI_PROVIDERS[selectedIndex] ?? null;
-  }
-
-  const provider = normalizeProvider(trimmedInput);
-
-  return provider;
+function getModelSelectionOptions(
+  provider: OpenWikiProvider,
+): ModelSelectionOption[] {
+  return [
+    ...getProviderModelOptions(provider).map((model) => ({
+      id: model.id,
+      kind: "preset" as const,
+      label: model.label,
+    })),
+    { kind: "custom" },
+  ];
 }
 
-function parseModelSelection(
-  value: string,
+function getSelectedModelId(
   provider: OpenWikiProvider,
-): string | null {
-  const trimmedInput = value.trim();
+  selectedIndex: number,
+  input: string,
+  isCustomInput: boolean,
+): string | "custom" | null {
+  if (!isCustomInput) {
+    const selectedOption = getModelSelectionOptions(provider)[selectedIndex];
 
-  if (trimmedInput.length === 0) {
-    return getDefaultModelId(provider);
+    if (!selectedOption) {
+      return null;
+    }
+
+    return selectedOption.kind === "custom" ? "custom" : selectedOption.id;
   }
 
-  if (/^\d+$/u.test(trimmedInput)) {
-    const selectedIndex = Number(trimmedInput) - 1;
-    const selectedModelId =
-      getProviderModelOptions(provider)[selectedIndex]?.id;
-
-    return selectedModelId ?? null;
-  }
-
-  const normalizedModelId = normalizeModelId(trimmedInput);
+  const normalizedModelId = normalizeModelId(input);
 
   return isValidModelId(normalizedModelId) ? normalizedModelId : null;
+}
+
+function getProviderSelectionIndex(provider: OpenWikiProvider): number {
+  const selectedIndex = SELECTABLE_OPENWIKI_PROVIDERS.findIndex(
+    (providerOption) => providerOption === provider,
+  );
+
+  return selectedIndex === -1 ? 0 : selectedIndex;
+}
+
+function getModelSelectionIndex(
+  provider: OpenWikiProvider,
+  selectedModelId: string,
+): number {
+  const selectedIndex = getModelSelectionOptions(provider).findIndex(
+    (option) => option.kind === "preset" && option.id === selectedModelId,
+  );
+
+  return selectedIndex === -1 ? 0 : selectedIndex;
+}
+
+function moveSelectionIndex(
+  currentIndex: number,
+  offset: number,
+  itemCount: number,
+): number {
+  if (itemCount <= 0) {
+    return 0;
+  }
+
+  return (currentIndex + offset + itemCount) % itemCount;
+}
+
+function getProviderArticle(provider: OpenWikiProvider): "a" | "an" {
+  return provider === "baseten" || provider === "fireworks" ? "a" : "an";
+}
+
+function sanitizeInputChunk(value: string): string {
+  return value.replace(/[\r\n]/gu, "");
 }
 
 function mask(value: string): string {
