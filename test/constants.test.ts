@@ -5,12 +5,14 @@ import {
   DEFAULT_PROVIDER,
   DEFAULT_VERTEX_LOCATION,
   getDefaultModelId,
+  getProviderBaseUrlWarnings,
   getMissingProviderEnvKey,
   getProviderApiKeyEnvKey,
   getProviderModelOptions,
   getProviderRegionEnvKey,
   getProviderSecretKeyEnvKey,
   isValidBaseUrl,
+  isValidProviderBaseUrl,
   isValidModelId,
   isValidProvider,
   NEBIUS_BASE_URL,
@@ -239,6 +241,39 @@ describe("isValidBaseUrl", () => {
     expect(isValidBaseUrl("   ")).toBe(false);
     expect(isValidBaseUrl("not a url")).toBe(false);
     expect(isValidBaseUrl("ftp://example.com")).toBe(false);
+  });
+});
+
+describe("isValidProviderBaseUrl", () => {
+  test("accepts OpenAI-compatible API root URLs", () => {
+    expect(
+      isValidProviderBaseUrl(
+        "openai-compatible",
+        "https://gateway.example.com/v1",
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects OpenAI-compatible chat completions endpoint URLs", () => {
+    expect(
+      isValidProviderBaseUrl(
+        "openai-compatible",
+        "https://gateway.example.com/v1/chat/completions",
+      ),
+    ).toBe(false);
+    expect(
+      getProviderBaseUrlWarnings(
+        "openai-compatible",
+        "https://gateway.example.com/v1/chat/completions/",
+      ),
+    ).toContain("use API root URL, not /chat/completions endpoint");
+  });
+
+  test("keeps generic http URL validation for other provider base URLs", () => {
+    expect(isValidProviderBaseUrl("anthropic", "not a url")).toBe(false);
+    expect(
+      getProviderBaseUrlWarnings("anthropic", "https://proxy.example.com"),
+    ).toEqual([]);
   });
 });
 

@@ -9,6 +9,7 @@ import {
   BEDROCK_AWS_REGION_ENV_KEY,
   BEDROCK_AWS_SECRET_ACCESS_KEY_ENV_KEY,
   FIREWORKS_API_KEY_ENV_KEY,
+  getProviderBaseUrlWarnings,
   GEMINI_API_KEY_ENV_KEY,
   GOOGLE_APPLICATION_CREDENTIALS_ENV_KEY,
   GOOGLE_CLOUD_LOCATION_ENV_KEY,
@@ -346,7 +347,11 @@ function createCredentialDiagnostic(
           ? getProviderWarnings(value)
           : key === OPENWIKI_PROVIDER_RETRY_ATTEMPTS_ENV_KEY
             ? getRetryAttemptsWarnings(value)
-            : getCredentialWarnings(value),
+            : key === OPENAI_COMPATIBLE_BASE_URL_ENV_KEY
+              ? getProviderBaseUrlWarnings("openai-compatible", value)
+              : key === ANTHROPIC_BASE_URL_ENV_KEY
+                ? getProviderBaseUrlWarnings("anthropic", value)
+                : getCredentialWarnings(value),
   };
 }
 

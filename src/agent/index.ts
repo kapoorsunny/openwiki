@@ -61,6 +61,7 @@ import {
   getProviderBaseUrlEnvKey,
   getProviderCredentialHint,
   getProviderLabel,
+  getProviderBaseUrlWarnings,
   getProviderModelOptions,
   getProviderRegionEnvKey,
   getProviderSecretKeyEnvKey,
@@ -523,12 +524,18 @@ function ensureProviderBaseUrl(provider: OpenWikiProvider): void {
     return;
   }
 
-  if (!resolveProviderBaseUrl(provider)) {
-    const baseUrlEnvKey = getProviderBaseUrlEnvKey(provider) ?? "base URL";
+  const baseUrlEnvKey = getProviderBaseUrlEnvKey(provider) ?? "base URL";
+  const baseUrl = resolveProviderBaseUrl(provider);
 
+  if (!baseUrl) {
     throw new Error(
       `${baseUrlEnvKey} is required to run OpenWiki with ${getProviderLabel(provider)}.`,
     );
+  }
+
+  const warnings = getProviderBaseUrlWarnings(provider, baseUrl);
+  if (warnings.length > 0) {
+    throw new Error(`${baseUrlEnvKey} is invalid: ${warnings.join(", ")}.`);
   }
 }
 
